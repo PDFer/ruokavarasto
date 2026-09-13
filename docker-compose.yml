@@ -1,0 +1,38 @@
+services:
+  grocy-mcp:
+    build: .
+    container_name: grocy-mcp
+    environment:
+      GROCY_URL: http://grocy
+      GROCY_API_KEY: ${GROCY_API_KEY}
+    volumes:
+      - ./data:/app/data
+      - ./normalizer.py:/app/normalizer.py:ro
+      - ./recipe_import:/app/recipe_import:ro
+      - ./recipe_importer.py:/app/recipe_importer.py
+
+  recipe-web:
+    build: .
+    container_name: recipe-web
+    working_dir: /app
+    command: uvicorn web:app --host 0.0.0.0 --port 8001
+    environment:
+      GROCY_URL: http://grocy
+      GROCY_API_KEY: ${GROCY_API_KEY}
+      LOG_LEVEL: INFO
+    volumes:
+      - ./data:/app/data
+      - ./normalizer.py:/app/normalizer.py:ro
+      - ./recipe_import:/app/recipe_import:ro
+      - ./recipe_importer.py:/app/recipe_importer.py
+      - ./web.py:/app/web.py:ro
+    ports:
+      - "8001:8001"
+
+    networks:
+      - grocy_default
+    restart: unless-stopped
+
+networks:
+  grocy_default:
+    external: true
