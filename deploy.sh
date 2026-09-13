@@ -27,14 +27,14 @@ echo "==> Päivitetään versioon $REMOTE"
 git pull --ff-only origin main
 
 echo "==> Rakennetaan Docker-imaget"
-docker compose build
+docker-compose build
 
 echo "==> Käynnistetään palvelut"
-docker compose up -d
+docker-compose up -d
 
 echo
 echo "==> Palveluiden tila"
-docker compose ps
+docker-compose ps
 
 echo
 echo "==> Deploy valmis"
