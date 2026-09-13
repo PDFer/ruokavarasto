@@ -16,6 +16,7 @@ UNITS = [
     "prk",
     "pkt",
     "ripaus",
+    "pussi",
 ]
 
 UNICODE_FRACTIONS = {
