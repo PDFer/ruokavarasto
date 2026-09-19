@@ -19,6 +19,7 @@ services:
     command: uvicorn web:app --host 0.0.0.0 --port 8001
     environment:
       GROCY_URL: http://grocy
+      GROCY_PUBLIC_URL: https://grocy.home
       GROCY_API_KEY: ${GROCY_API_KEY}
       LOG_LEVEL: INFO
     volumes:

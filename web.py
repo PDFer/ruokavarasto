@@ -258,7 +258,10 @@ async def preview(url: str = Form(...)):
                 <li>{text}</li>
                 """
 
-        grocy_new_product_url = os.environ["GROCY_URL"].rstrip("/") + "/product/new"
+        # GROCY_URL on sisäverkon (kontti-verkon) osoite, jota selain ei
+        # pysty avaamaan - linkkiä varten tarvitaan julkinen osoite erikseen.
+        grocy_browser_base = os.environ.get("GROCY_PUBLIC_URL") or os.environ["GROCY_URL"]
+        grocy_new_product_url = grocy_browser_base.rstrip("/") + "/product/new"
 
         return f"""
         <!DOCTYPE html>
