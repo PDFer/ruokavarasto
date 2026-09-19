@@ -468,7 +468,7 @@ async def save_recipe_to_grocy(recipe, ingredients):
         except Exception as e:
             raise ValueError(
                 f"Ainesosan '{ingredient['name']}' tallennus epäonnistui: "
-                f"tuote ID {product_id}, yksikkö '{unit}' (qu_id {qu_id}). "
+                f"tuote ID {product_id}, qu_id {qu_id}. "
                 f"Grocy: {e}"
             ) from e
     return recipe_id
