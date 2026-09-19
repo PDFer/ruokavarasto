@@ -5,6 +5,7 @@ from html.parser import HTMLParser
 from urllib.request import Request, urlopen
 from recipe_import.ingredient_parser import parse_ingredients
 from normalizer import normalize_ingredient
+from recipe_scrapers import scrape_html
 import os
 
 from grocy_mcp.client import GrocyClient
@@ -42,7 +43,7 @@ class JSONLDParser(HTMLParser):
             self.current = []
 
 
-def fetch_recipe(url):
+def _download(url):
     request = Request(
         url,
         headers={
@@ -51,8 +52,10 @@ def fetch_recipe(url):
     )
 
     with urlopen(request, timeout=20) as response:
-        html = response.read().decode("utf-8", errors="replace")
+        return response.read().decode("utf-8", errors="replace")
 
+
+def _extract_json_ld(html, url=None):
     parser = JSONLDParser()
     parser.feed(html)
 
@@ -91,7 +94,53 @@ def fetch_recipe(url):
                     "instructions": item.get("recipeInstructions", []),
                 }
 
-    raise ValueError("Sivulta ei löytynyt Recipe JSON-LD -tietoa")
+    return None
+
+
+def _safe_call(method):
+    try:
+        return method()
+    except NotImplementedError:
+        return None
+    except Exception:
+        return None
+
+
+def _extract_via_recipe_scrapers(html, url):
+    try:
+        scraper = scrape_html(html=html, org_url=url, wild_mode=True)
+    except Exception as e:
+        logger.debug("recipe-scrapers ei tunnistanut reseptiä (%s): %s", url, e)
+        return None
+
+    ingredients = _safe_call(scraper.ingredients) or []
+
+    if not ingredients:
+        return None
+
+    return {
+        "name": _safe_call(scraper.title),
+        "description": _safe_call(scraper.description),
+        "yield": _safe_call(scraper.yields),
+        "ingredients": ingredients,
+        "instructions": _safe_call(scraper.instructions_list) or [],
+    }
+
+
+def fetch_recipe(url):
+    html = _download(url)
+
+    for extractor in (_extract_json_ld, _extract_via_recipe_scrapers):
+        try:
+            recipe = extractor(html, url)
+        except Exception as e:
+            logger.debug("extraktori %s epäonnistui: %s", extractor.__name__, e)
+            continue
+
+        if recipe and recipe.get("ingredients"):
+            return recipe
+
+    raise ValueError("Sivulta ei löytynyt reseptitietoa millään tunnetulla menetelmällä")
 
 def import_recipe(url):
     recipe = fetch_recipe(url)
