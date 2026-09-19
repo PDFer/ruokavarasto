@@ -6,6 +6,7 @@ from urllib.request import Request, urlopen
 from recipe_import.ingredient_parser import parse_ingredients
 from normalizer import normalize_ingredient
 from recipe_scrapers import scrape_html
+from db_init import ensure_schema
 import os
 
 from grocy_mcp.client import GrocyClient
@@ -383,15 +384,6 @@ async def save_recipe_to_grocy(recipe, ingredients):
         os.environ["GROCY_API_KEY"],
     )
 
-    # Hae Grocyn yksiköt kerran
-    quantity_units = await client.get_objects("quantity_units")
-
-    unit_map = {
-        unit["name"].lower(): unit["id"]
-        for unit in quantity_units
-        if unit.get("active", 1)
-    }
-
     instructions = recipe.get("instructions", [])
 
     instruction_text = (
@@ -441,26 +433,17 @@ async def save_recipe_to_grocy(recipe, ingredients):
 
         product_id = grocy["matched_product_id"]
 
-        unit = ingredient.get("unit")
-
-        if not unit:
-            raise ValueError(
-                f"Ainesosalta '{ingredient['name']}' puuttuu yksikkö."
-            )
-
-        qu_id = unit_map.get(unit.lower())
+        qu_id = ingredient.get("grocy_qu_id")
 
         if qu_id is None:
             raise ValueError(
-                f"Grocyssa ei ole yksikköä '{unit}' "
-                f"ainesosalle '{ingredient['name']}'."
+                f"Ainesosalle '{ingredient['name']}' ei ole valittu Grocy-yksikköä."
             )
 
         logger.debug(
-            "TALLENNUS: %s %s %s -> product_id=%s, qu_id=%s",
+            "TALLENNUS: %s %s -> product_id=%s, qu_id=%s",
             ingredient["name"],
             ingredient["amount"],
-            unit,
             product_id,
             qu_id,
         )
@@ -490,39 +473,40 @@ async def save_recipe_to_grocy(recipe, ingredients):
             ) from e
     return recipe_id
 
-async def create_grocy_product(name, unit):
-    client = GrocyClient(
-        os.environ["GROCY_URL"],
-        os.environ["GROCY_API_KEY"],
-    )
+def get_unit_mapping(source_term):
+    """Hae vahvistettu Grocy-yksikkömappaus annetulle raakatekstille."""
+    if not source_term:
+        return None
 
-    quantity_units = await client.get_objects("quantity_units")
+    with sqlite3.connect("/app/data/normalization.db") as db:
+        row = db.execute(
+            """
+            SELECT grocy_qu_id
+            FROM unit_grocy_mapping
+            WHERE source_term = ?
+              AND confirmed = 1
+            """,
+            (source_term,),
+        ).fetchone()
 
-    unit_map = {
-        u["name"].lower(): u["id"]
-        for u in quantity_units
-        if u.get("active", 1)
-    }
+    return row[0] if row else None
 
-    qu_id = unit_map.get(unit.lower())
 
-    if qu_id is None:
-        raise ValueError(f"Grocyssa ei ole yksikköä '{unit}'.")
-
-    product_id = await client.create_object(
-        "products",
-        {
-            "name": name,
-            "location_id": 5,
-            "qu_id_purchase": qu_id,
-            "qu_id_stock": qu_id,
-            "qu_id_consume": qu_id,
-        },
-    )
-
-    await client._client.aclose()
-
-    return product_id
+def save_unit_mapping(source_term, grocy_qu_id):
+    with sqlite3.connect("/app/data/normalization.db") as db:
+        db.execute(
+            """
+            INSERT INTO unit_grocy_mapping
+                (source_term, grocy_qu_id, confirmed)
+            VALUES (?, ?, 1)
+            ON CONFLICT(source_term)
+            DO UPDATE SET
+                grocy_qu_id = excluded.grocy_qu_id,
+                confirmed = 1
+            """,
+            (source_term, grocy_qu_id),
+        )
+        db.commit()
 
 def save_ingredient_mapping(normalized_term, grocy_product_id):
     with sqlite3.connect("/app/data/normalization.db") as db:
@@ -552,4 +536,5 @@ async def test_save():
 
 if __name__ == "__main__":
     import asyncio
+    ensure_schema()
     asyncio.run(test_save())

@@ -6,13 +6,14 @@ from recipe_importer import (
     match_ingredients,
     format_recipe_preview,
     save_recipe_to_grocy,
-    create_grocy_product,
     save_ingredient_mapping,
+    get_unit_mapping,
+    save_unit_mapping,
 )
 from normalizer import normalize
 from grocy_mcp.client import GrocyClient
+from db_init import ensure_schema
 import os
-import json
 import logging
 
 async def get_grocy_products():
@@ -26,6 +27,17 @@ async def get_grocy_products():
 
     return products
 
+async def get_grocy_quantity_units():
+    client = GrocyClient(
+        os.environ["GROCY_URL"],
+        os.environ["GROCY_API_KEY"],
+    )
+
+    quantity_units = await client.get_objects("quantity_units")
+    await client._client.aclose()
+
+    return quantity_units
+
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
 )
@@ -33,6 +45,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
+
+
+@app.on_event("startup")
+async def on_startup():
+    ensure_schema()
 
 
 def suggest_product(ingredient_name, products):
@@ -60,6 +77,28 @@ def suggest_product(ingredient_name, products):
 
     if len(candidates) == 1:
         return candidates[0]["id"]
+
+    return None
+
+def suggest_unit(unit_text, quantity_units):
+    if not unit_text:
+        return None
+
+    mapped = get_unit_mapping(unit_text)
+
+    if mapped is not None:
+        return mapped
+
+    normalized = unit_text.casefold().strip()
+
+    exact = [
+        u for u in quantity_units
+        if u["name"].casefold().strip() == normalized
+        or (u.get("name_plural") or "").casefold().strip() == normalized
+    ]
+
+    if len(exact) == 1:
+        return exact[0]["id"]
 
     return None
 
@@ -101,6 +140,9 @@ async def preview(url: str = Form(...)):
         products = await get_grocy_products()
         products.sort(key=lambda p: p["name"].casefold())
 
+        quantity_units = await get_grocy_quantity_units()
+        quantity_units.sort(key=lambda u: u["name"].casefold())
+
         product_options = ""
         for product in products:
             product_options += (
@@ -121,22 +163,42 @@ async def preview(url: str = Form(...)):
                     products,
                 )
 
-            options = ""
+            product_options_row = ""
 
             # Tyhjä vaihtoehto unmatched-tilanteelle
             if selected_id is None:
-                options += '<option value="" selected>-- Ei valintaa --</option>'
+                product_options_row += '<option value="" selected>-- Ei valintaa --</option>'
             else:
-                options += '<option value="">-- Ei valintaa --</option>'
+                product_options_row += '<option value="">-- Ei valintaa --</option>'
 
             for product in products:
                 selected = ""
                 if product["id"] == selected_id:
                     selected = " selected"
 
-                options += (
+                product_options_row += (
                     f'<option value="{product["id"]}"{selected}>'
                     f'{product["name"]}'
+                    f'</option>'
+                )
+
+            selected_qu_id = suggest_unit(ingredient["unit"], quantity_units)
+
+            unit_options_row = ""
+
+            if selected_qu_id is None:
+                unit_options_row += '<option value="" selected>-- Ei valintaa --</option>'
+            else:
+                unit_options_row += '<option value="">-- Ei valintaa --</option>'
+
+            for qu in quantity_units:
+                selected = ""
+                if qu["id"] == selected_qu_id:
+                    selected = " selected"
+
+                unit_options_row += (
+                    f'<option value="{qu["id"]}"{selected}>'
+                    f'{qu["name"]}'
                     f'</option>'
                 )
 
@@ -146,26 +208,36 @@ async def preview(url: str = Form(...)):
             else:
                 amount_text = f"{amount:g}"
 
-            unit = ingredient["unit"] or ""
+            unit_missing_marker = ""
+            if ingredient.get("unit_missing"):
+                unit_missing_marker = (
+                    ' <span title="Yksikköä ei tunnistettu automaattisesti">⚠</span>'
+                )
+
             name = ingredient["name"]
 
-            name_js = json.dumps(name)
-            
             ingredient_rows += f"""
             <tr>
-                <td>{amount_text}</td>
-                <td>{unit}</td>
+                <td>
+                    <input
+                        type="number"
+                        step="any"
+                        name="amount_{index}"
+                        id="amount_{index}"
+                        value="{amount_text}"
+                        style="width: 5rem;"
+                    >
+                </td>
+                <td>
+                    <select name="unit_{index}" id="unit_{index}" class="unit-select">
+                        {unit_options_row}
+                    </select>{unit_missing_marker}
+                </td>
                 <td>{name}</td>
                 <td>
                     <select name="product_{index}" id="product_{index}">
-                        {options}
+                        {product_options_row}
                     </select>
-                    <button
-                        type="button"
-                        onclick='createProduct({index}, {name_js}, {json.dumps(unit)})'
-                    >
-                        + Luo uusi
-                    </button>
                 </td>
             </tr>
             """
@@ -185,6 +257,8 @@ async def preview(url: str = Form(...)):
                 instruction_rows += f"""
                 <li>{text}</li>
                 """
+
+        grocy_new_product_url = os.environ["GROCY_URL"].rstrip("/") + "/product/new"
 
         return f"""
         <!DOCTYPE html>
@@ -216,6 +290,10 @@ async def preview(url: str = Form(...)):
                     min-width: 250px;
                     padding: 0.4rem;
                 }}
+
+                select.unit-select {{
+                    min-width: 120px;
+                }}
             </style>
         </head>
 
@@ -226,6 +304,16 @@ async def preview(url: str = Form(...)):
                 Annoksia:
                 <strong>{recipe["yield"]["amount"]:g}</strong>
                 {recipe["yield"]["unit"]}
+            </p>
+
+            <p>
+                <a href="{grocy_new_product_url}" target="_blank" rel="noopener">
+                    ↗ Lisää uusi tuote Grocyyn (uusi välilehti)
+                </a>
+                &nbsp;·&nbsp;
+                <button type="button" onclick="refreshOptions()">
+                    ↻ Päivitä valikot
+                </button>
             </p>
 
             <form method="post" action="/save">
@@ -265,47 +353,43 @@ async def preview(url: str = Form(...)):
                 <a href="/">← Takaisin</a>
             </p>
         <script>
-            async function createProduct(index, ingredientName, unit) {{
-                const productName = prompt(
-                    "Uuden Grocy-tuotteen nimi:",
-                    ingredientName
-                );
+            function escapeHtml(text) {{
+                const div = document.createElement("div");
+                div.textContent = text;
+                return div.innerHTML;
+            }}
 
-                if (!productName) {{
+            function buildOptions(items, currentValue) {{
+                let html = '<option value="">-- Ei valintaa --</option>';
+
+                for (const item of items) {{
+                    const selected = String(item.id) === currentValue ? " selected" : "";
+                    html += `<option value="${{item.id}}"${{selected}}>${{escapeHtml(item.name)}}</option>`;
+                }}
+
+                return html;
+            }}
+
+            async function refreshOptions() {{
+                let data;
+
+                try {{
+                    const response = await fetch("/refresh-options");
+                    data = await response.json();
+                }} catch (error) {{
+                    alert("Valikoiden päivitys epäonnistui:\\n" + error);
                     return;
                 }}
 
-                const formData = new FormData();
-                formData.append("product_name", productName);
-                formData.append("unit", unit);
+                document.querySelectorAll('select[id^="product_"]').forEach(select => {{
+                    const current = select.value;
+                    select.innerHTML = buildOptions(data.products, current);
+                }});
 
-                try {{
-                    const response = await fetch("/create-product", {{
-                        method: "POST",
-                        body: formData
-                    }});
-
-                    const result = await response.json();
-
-                    if (!response.ok || !result.success) {{
-                        alert("Tuotteen luonti epäonnistui:\\n" + result.error);
-                        return;
-                    }}
-
-                    const select = document.getElementById("product_" + index);
-
-                    const option = new Option(
-                        result.product_name,
-                        result.product_id,
-                        true,
-                        true
-                    );
-
-                    select.add(option);
-
-                }} catch (error) {{
-                    alert("Tuotteen luonti epäonnistui:\\n" + error);
-                }}
+                document.querySelectorAll('select[id^="unit_"]').forEach(select => {{
+                    const current = select.value;
+                    select.innerHTML = buildOptions(data.quantity_units, current);
+                }});
             }}
         </script>
         </body>
@@ -338,11 +422,13 @@ async def save(
         recipe = import_recipe(url)
         ingredients = await match_ingredients(recipe["ingredients"])
 
-        # Luetaan käyttäjän tekemät Grocy-tuotevalinnat
+        # Luetaan käyttäjän tekemät Grocy-tuote- ja yksikkövalinnat
         for index, ingredient in enumerate(ingredients):
-            value = form_data.get(f"product_{index}")
+            product_value = form_data.get(f"product_{index}")
+            unit_value = form_data.get(f"unit_{index}")
+            amount_value = form_data.get(f"amount_{index}")
 
-            if not value:
+            if not product_value:
                 return HTMLResponse(
                     f"""
                     <h1>Reseptiä ei tallennettu</h1>
@@ -356,12 +442,57 @@ async def save(
                     status_code=400,
                 )
 
-            ingredient["grocy"]["matched_product_id"] = int(value)
+            if not unit_value:
+                return HTMLResponse(
+                    f"""
+                    <h1>Reseptiä ei tallennettu</h1>
+                    <p>
+                        Ainesosalle
+                        <strong>{ingredient["name"]}</strong>
+                        ei ole valittu Grocy-yksikköä.
+                    </p>
+                    <p><a href="javascript:history.back()">← Takaisin</a></p>
+                    """,
+                    status_code=400,
+                )
+
+            # Alkuperäinen reseptin määrä voidaan haluta muuttaa
+            # (esim. eri yksikköön siirryttäessä), joten luetaan lomakkeelta.
+            if amount_value:
+                try:
+                    ingredient["amount"] = float(str(amount_value).replace(",", "."))
+                except ValueError:
+                    return HTMLResponse(
+                        f"""
+                        <h1>Reseptiä ei tallennettu</h1>
+                        <p>
+                            Ainesosan
+                            <strong>{ingredient["name"]}</strong>
+                            määrä <strong>{amount_value}</strong> ei ole kelvollinen luku.
+                        </p>
+                        <p><a href="javascript:history.back()">← Takaisin</a></p>
+                        """,
+                        status_code=400,
+                    )
+
+            ingredient["grocy"]["matched_product_id"] = int(product_value)
             ingredient["grocy"]["status"] = "matched"
+            ingredient["grocy_qu_id"] = int(unit_value)
+
             save_ingredient_mapping(
                 ingredient["name"],
-                int(value),
+                int(product_value),
             )
+
+            # Muistetaan yksikkövalinta vain, jos jäsentäjä tunnisti
+            # reseptistä alkuperäisen yksikkötekstin - täysin tunnistamatta
+            # jääneen (esim. "1 valkosipulinkynsi") kohdalla käyttäjä
+            # valitsee yksikön joka kerta erikseen.
+            if ingredient.get("unit"):
+                save_unit_mapping(
+                    ingredient["unit"],
+                    int(unit_value),
+                )
 
         recipe_id = await save_recipe_to_grocy(recipe, ingredients)
 
@@ -406,31 +537,29 @@ async def save(
         </html>
         """
 
-@app.post("/create-product")
-async def create_product(
-    product_name: str = Form(...),
-    unit: str = Form(...),
-):
+@app.get("/refresh-options")
+async def refresh_options():
     try:
-        product_name = product_name.strip()
+        products = await get_grocy_products()
+        products.sort(key=lambda p: p["name"].casefold())
 
-        if not product_name:
-            raise ValueError("Tuotteen nimi puuttuu.")
-
-        product_id = await create_grocy_product(product_name, unit)
+        quantity_units = await get_grocy_quantity_units()
+        quantity_units.sort(key=lambda u: u["name"].casefold())
 
         return {
-            "success": True,
-            "product_id": product_id,
-            "product_name": product_name,
+            "products": [
+                {"id": p["id"], "name": p["name"]}
+                for p in products
+            ],
+            "quantity_units": [
+                {"id": u["id"], "name": u["name"]}
+                for u in quantity_units
+            ],
         }
 
     except Exception as e:
         return JSONResponse(
-            {
-                "success": False,
-                "error": str(e),
-            },
+            {"error": str(e)},
             status_code=400,
         )
 
