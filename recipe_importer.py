@@ -148,7 +148,14 @@ def import_recipe(url):
     ingredients = parse_ingredients(recipe["ingredients"])
     ingredients = [normalize_ingredient(i) for i in ingredients]
 
-    recipe["ingredients"] = ingredients
+    # Ainesosat, joilla ei ole määrää (esim. "basilikaa" makuun), eivät
+    # sovi Grocyn varastonseurantaan järkevästi - ne käsitellään erikseen
+    # tekstimuotoisena mainintana eikä varastoa vaativana reseptirivinä.
+    tracked = [i for i in ingredients if i["amount"] is not None]
+    untracked = [i for i in ingredients if i["amount"] is None]
+
+    recipe["ingredients"] = tracked
+    recipe["untracked_ingredients"] = untracked
     recipe["yield"] = parse_yield(recipe["yield"])
 
     return recipe
@@ -249,6 +256,18 @@ def format_recipe_preview(recipe, ingredients):
         for note in ingredient["notes"]:
             lines.append(f"  → {note}")
 
+        if ingredient.get("unit_missing"):
+            lines.append(
+                "  → ⚠ Yksikköä ei tunnistettu - tarkista/korjaa ennen tallennusta"
+            )
+
+        lines.append("")
+
+    untracked = recipe.get("untracked_ingredients") or []
+    untracked_names = [i["name"] for i in untracked if i.get("name")]
+
+    if untracked_names:
+        lines.append("Lisäksi (ei varastoseurantaa): " + ", ".join(untracked_names))
         lines.append("")
 
     # Valmistusohje
@@ -388,6 +407,18 @@ async def save_recipe_to_grocy(recipe, ingredients):
         "</div>"
         "</div>"
     )
+
+    untracked = recipe.get("untracked_ingredients") or []
+    untracked_names = [i["name"] for i in untracked if i.get("name")]
+
+    if untracked_names:
+        instruction_text += (
+            '<div class="is-block has-inner-container">'
+            '<div class="inner-container">'
+            f"<p>Lisäksi: {escape(', '.join(untracked_names))}</p>"
+            "</div>"
+            "</div>"
+        )
 
     recipe_id = await client.create_object(
         "recipes",

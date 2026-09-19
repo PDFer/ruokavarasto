@@ -80,6 +80,12 @@ def parse_ingredient(raw: str) -> dict:
     notes, text = extract_notes(raw)
     text = re.sub(r"\s+", " ", text).strip()
 
+    if not text and notes:
+        # Koko ainesosa oli sulkeiden sisällä, esim. "(basilikaa)" ->
+        # käytetään sulkeiden sisältöä nimenä tyhjän sijaan.
+        text = " ".join(notes).strip()
+        notes = []
+
     number_pattern = r"(\d+\s+\d+/\d+|\d+/\d+|\d+(?:[.,]\d+)?)"
 
     unit_pattern = "|".join(re.escape(unit) for unit in UNITS)
@@ -100,6 +106,7 @@ def parse_ingredient(raw: str) -> dict:
             "unit": unit.lower(),
             "name": name.strip(),
             "notes": notes,
+            "unit_missing": False,
         }
 
     match = re.match(
@@ -108,23 +115,48 @@ def parse_ingredient(raw: str) -> dict:
         re.IGNORECASE,
     )
 
-    if not match:
+    if match:
+        number_text, unit, name = match.groups()
+
         return {
             "raw": raw,
-            "amount": None,
-            "unit": None,
-            "name": text,
+            "amount": parse_number(number_text),
+            "unit": unit.lower(),
+            "name": name.strip(),
             "notes": notes,
+            "unit_missing": False,
         }
 
-    number_text, unit, name = match.groups()
+    # Numero löytyy, mutta sen jälkeinen sana ei ole tunnettu yksikkö
+    # (esim. "1 valkosipulinkynsi", "3 kananmunaa") - ainesosaa EI pidä
+    # jättää huomiotta, vaan sille pitää merkitä puuttuva yksikkö, jotta
+    # käyttäjä voi täydentää sen ennen tallennusta.
+    match = re.match(
+        rf"^\s*{number_pattern}\s+(.+)$",
+        text,
+    )
 
+    if match:
+        number_text, name = match.groups()
+
+        return {
+            "raw": raw,
+            "amount": parse_number(number_text),
+            "unit": None,
+            "name": name.strip(),
+            "notes": notes,
+            "unit_missing": True,
+        }
+
+    # Ei numeroa lainkaan - todennäköisesti mauste/lisuke ilman määrää
+    # (esim. "basilikaa"), ei siis varsinaisesti "puuttuva yksikkö".
     return {
         "raw": raw,
-        "amount": parse_number(number_text),
-        "unit": unit.lower(),
-        "name": name.strip(),
+        "amount": None,
+        "unit": None,
+        "name": text,
         "notes": notes,
+        "unit_missing": False,
     }
 
 
