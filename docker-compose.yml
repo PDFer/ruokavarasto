@@ -10,6 +10,7 @@ services:
       - ./normalizer.py:/app/normalizer.py:ro
       - ./recipe_import:/app/recipe_import:ro
       - ./recipe_importer.py:/app/recipe_importer.py
+      - ./db_init.py:/app/db_init.py:ro
 
   recipe-web:
     build: .
@@ -26,6 +27,7 @@ services:
       - ./recipe_import:/app/recipe_import:ro
       - ./recipe_importer.py:/app/recipe_importer.py
       - ./web.py:/app/web.py:ro
+      - ./db_init.py:/app/db_init.py:ro
     ports:
       - "8001:8001"
 
