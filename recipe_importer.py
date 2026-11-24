@@ -4,6 +4,7 @@ from html import escape
 from html.parser import HTMLParser
 from urllib.request import Request, urlopen
 from recipe_import.ingredient_parser import parse_ingredients
+from recipe_import.image_ocr import extract_recipe_from_image
 from normalizer import normalize_ingredient
 from recipe_scrapers import scrape_html
 from db_init import ensure_schema
@@ -143,9 +144,8 @@ def fetch_recipe(url):
 
     raise ValueError("Sivulta ei löytynyt reseptitietoa millään tunnetulla menetelmällä")
 
-def import_recipe(url):
-    recipe = fetch_recipe(url)
-
+def prepare_recipe(recipe):
+    recipe = dict(recipe)
     ingredients = parse_ingredients(recipe["ingredients"])
     ingredients = [normalize_ingredient(i) for i in ingredients]
 
@@ -160,6 +160,15 @@ def import_recipe(url):
     recipe["yield"] = parse_yield(recipe["yield"])
 
     return recipe
+
+
+def import_recipe(url):
+    return prepare_recipe(fetch_recipe(url))
+
+
+def import_recipe_from_image(image):
+    return prepare_recipe(extract_recipe_from_image(image))
+
 
 async def match_ingredients(ingredients):
     client = GrocyClient(
