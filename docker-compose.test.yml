@@ -1,0 +1,63 @@
+# Docker Compose konfiguraatio integraatiotestausympäristölle
+# 
+# Käyttö:
+#   docker-compose -f docker-compose.test.yml up -d
+#   python -m pytest tests/test_image_integration.py -v
+#   docker-compose -f docker-compose.test.yml down
+
+version: '3.8'
+
+services:
+  # Grocy - varastonhallintajärjestelmä
+  grocy:
+    image: lscr.io/linuxserver/grocy:latest
+    container_name: grocy-test
+    environment:
+      PUID: 1000
+      PGID: 1000
+      TZ: Europe/Helsinki
+    volumes:
+      - grocy_data:/config
+    ports:
+      - "8080:80"
+    networks:
+      - test_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/api/system/info"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Resepti-importer test-service
+  recipe-importer-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: recipe-importer-test
+    environment:
+      GROCY_URL: http://grocy
+      GROCY_API_KEY: "demo_key"
+      DB_PATH: /app/data/normalization.db
+      LOG_LEVEL: DEBUG
+    volumes:
+      - ./data:/app/data
+      - ./normalizer.py:/app/normalizer.py:ro
+      - ./recipe_import:/app/recipe_import:ro
+      - ./recipe_importer.py:/app/recipe_importer.py:ro
+      - ./tests:/app/tests:ro
+      - ./db_init.py:/app/db_init.py:ro
+    networks:
+      - test_network
+    depends_on:
+      grocy:
+        condition: service_healthy
+    command: tail -f /dev/null  # Keep container running for manual testing
+
+volumes:
+  grocy_data:
+    driver: local
+
+networks:
+  test_network:
+    driver: bridge

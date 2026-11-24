@@ -1,10 +1,15 @@
 import sqlite3
+import os
 
-DB_PATH = "/app/data/normalization.db"
+
+def get_db_path():
+    """Hae tietokannan polku ympäristömuuttujasta."""
+    return os.environ.get("DB_PATH", "/app/data/normalization.db")
 
 
 def normalize(term):
-    with sqlite3.connect(DB_PATH) as db:
+    db_path = get_db_path()
+    with sqlite3.connect(db_path) as db:
         row = db.execute(
             """
             SELECT normalized_term
