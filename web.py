@@ -1,8 +1,15 @@
-from fastapi import FastAPI, Form, Request
+from io import BytesIO
+from html import escape
+import warnings
+
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
+from PIL import Image, UnidentifiedImageError
+from starlette.concurrency import run_in_threadpool
 
 from recipe_importer import (
     import_recipe,
+    prepare_recipe,
     match_ingredients,
     format_recipe_preview,
     save_recipe_to_grocy,
@@ -10,6 +17,7 @@ from recipe_importer import (
     get_unit_mapping,
     save_unit_mapping,
 )
+from recipe_import.image_ocr import parse_ocr_recipe, read_image_text
 from normalizer import normalize
 from grocy_mcp.client import GrocyClient
 from db_init import ensure_schema
@@ -45,6 +53,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
+
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_IMAGE_PIXELS = 20_000_000
+IMAGE_FORMATS = {"JPEG", "PNG"}
 
 
 @app.on_event("startup")
@@ -126,10 +138,171 @@ async def index():
             <br><br>
             <button type="submit">Esikatsele</button>
         </form>
+
+        <h2>Reseptikuva</h2>
+        <form method="post" action="/image" enctype="multipart/form-data">
+            <label for="image">Valitse yksi JPEG- tai PNG-kuva (enintään 10 Mt):</label><br>
+            <input type="file" id="image" name="image" accept="image/jpeg,image/png" required>
+            <br><br>
+            <button type="submit">Lue kuva</button>
+        </form>
     </body>
     </html>
     """
 
+
+def image_error(message, status_code=400):
+    return HTMLResponse(
+        f'<h1>Kuvan käsittely epäonnistui</h1><p>{escape(message)}</p>'
+        '<p><a href="/">← Takaisin</a></p>',
+        status_code=status_code,
+    )
+
+
+def image_editor(text, recipe=None, message=None, prepared=None):
+    notice = f'<p role="alert">{escape(message)}</p>' if message else ""
+    fields = ""
+    if recipe is not None:
+        ingredients = "\n".join(recipe["ingredients"])
+        instructions = "\n".join(recipe["instructions"])
+        fields = f"""
+        <h2>Korjaa reseptin tiedot</h2>
+        <form method="post" action="/image/preview">
+            <input type="hidden" name="source_text" value="{escape(text, quote=True)}">
+            <label for="name">Nimi</label><br>
+            <input id="name" name="name" value="{escape(recipe["name"], quote=True)}" required><br>
+            <label for="yield">Annokset</label><br>
+            <input id="yield" name="yield_value" value="{escape(recipe["yield"] or "", quote=True)}"><br>
+            <label for="ingredients">Ainesosat, yksi riville</label><br>
+            <textarea id="ingredients" name="ingredients" rows="10" cols="60" required>{escape(ingredients)}</textarea><br>
+            <label for="instructions">Valmistusohje, yksi vaihe riville</label><br>
+            <textarea id="instructions" name="instructions" rows="10" cols="60">{escape(instructions)}</textarea><br>
+            <button type="submit">Esikatsele korjaukset</button>
+        </form>
+        """
+
+    preview = ""
+    if prepared is not None:
+        rows = "".join(
+            f"<li>{escape(item['raw'])} → {escape(item['name'])}"
+            f" ({escape(str(item['amount']))} {escape(item['unit'] or 'yksikkö puuttuu')})</li>"
+            for item in prepared["ingredients"]
+        )
+        untracked = "".join(
+            f"<li>{escape(item['raw'])} → {escape(item['name'])}</li>"
+            for item in prepared["untracked_ingredients"]
+        )
+        preview = f"""
+        <h2>Jäsennetyt ainesosat</h2>
+        <ul>{rows}</ul>
+        <h3>Ilman määrää (ei varastoseurantaa)</h3>
+        <ul>{untracked}</ul>
+        """
+
+    return f"""
+    <!DOCTYPE html>
+    <html lang="fi">
+    <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Kuvareseptin esikatselu</title></head>
+    <body>
+        <h1>Kuvareseptin esikatselu</h1>
+        <p>Tarkista OCR-tulos. Kuvareseptin tallennus Grocyyn ei ole vielä käytettävissä;
+        tietoja ei säilytetä, kun poistut sivulta.</p>
+        {notice}
+        <form method="post" action="/image/text">
+            <label for="text">Kuvasta tunnistettu teksti</label><br>
+            <textarea id="text" name="text" rows="15" cols="60" required>{escape(text)}</textarea><br>
+            <p>Tekstin uudelleenjäsentäminen korvaa alla olevat reseptikentät.</p>
+            <button type="submit">Jäsennä teksti uudelleen</button>
+        </form>
+        {fields}
+        {preview}
+        <p><a href="/">← Takaisin</a></p>
+    </body></html>
+    """
+
+
+def validate_image(data):
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(data)) as image:
+                if image.format not in IMAGE_FORMATS:
+                    raise ValueError("Valitse JPEG- tai PNG-kuva.")
+                if image.width * image.height > MAX_IMAGE_PIXELS:
+                    raise ValueError("Kuva on liian suuri (enintään 20 megapikseliä).")
+                image.verify()
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError,
+            Image.DecompressionBombWarning) as error:
+        raise ValueError("Kuvaa ei voi avata tai se on liian suuri.") from error
+
+
+@app.post("/image", response_class=HTMLResponse)
+async def image_upload(image: UploadFile = File(...)):
+    try:
+        data = await image.read(MAX_IMAGE_BYTES + 1)
+        if len(data) > MAX_IMAGE_BYTES:
+            return image_error("Kuva on liian suuri (enintään 10 Mt).")
+        await run_in_threadpool(validate_image, data)
+        text = await run_in_threadpool(read_image_text, BytesIO(data))
+        if not text.strip():
+            return image_error("Kuvasta ei saatu luettua tekstiä.")
+        return image_text_preview(text)
+    except ValueError as error:
+        return image_error(str(error))
+    except Exception:
+        logger.exception("Kuvan OCR epäonnistui")
+        return image_error("Kuvan tekstintunnistus epäonnistui. Tarkista palvelimen loki.", 500)
+    finally:
+        await image.close()
+
+
+@app.post("/image/text", response_class=HTMLResponse)
+def image_text_preview(text: str = Form(...)):
+    try:
+        recipe = parse_ocr_recipe(text)
+    except ValueError as error:
+        return HTMLResponse(image_editor(text, message=str(error)), status_code=400)
+    return HTMLResponse(image_editor(text, recipe))
+
+
+@app.post("/image/preview", response_class=HTMLResponse)
+def image_recipe_preview(
+    name: str = Form(...),
+    ingredients: str = Form(...),
+    yield_value: str = Form(""),
+    instructions: str = Form(""),
+    source_text: str = Form(""),
+):
+    recipe = {
+        "name": name.strip(),
+        "description": None,
+        "yield": yield_value.strip() or None,
+        "ingredients": [line.strip() for line in ingredients.splitlines() if line.strip()],
+        "instructions": [line.strip() for line in instructions.splitlines() if line.strip()],
+    }
+    text = source_text or "\n".join(
+        [recipe["name"], recipe["yield"] or "", "Ainekset", ingredients, "Valmistus", instructions]
+    )
+    if not recipe["name"] or not recipe["ingredients"]:
+        return HTMLResponse(
+            image_editor(text, recipe, "Anna reseptin nimi ja vähintään yksi ainesosa."),
+            status_code=400,
+        )
+    try:
+        prepared = prepare_recipe(recipe)
+    except (ValueError, ZeroDivisionError):
+        return HTMLResponse(
+            image_editor(text, recipe, "Ainesosien jäsentäminen epäonnistui. Tarkista määrät."),
+            status_code=400,
+        )
+    except Exception:
+        logger.exception("Kuvareseptin jäsentäminen epäonnistui")
+        return HTMLResponse(
+            image_editor(text, recipe, "Reseptin jäsentäminen epäonnistui. Tarkista tiedot ja palvelimen loki."),
+            status_code=500,
+        )
+    return HTMLResponse(image_editor(text, recipe, prepared=prepared))
 
 
 @app.post("/preview", response_class=HTMLResponse)
